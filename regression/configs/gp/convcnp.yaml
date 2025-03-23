@@ -1,0 +1,3 @@
+dim_x: 1                  
+dim_y: 1                  
+likelihood: "het"          # ConvCNP

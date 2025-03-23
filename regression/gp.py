@@ -71,7 +71,7 @@ def main():
     with open(f'configs/gp/{args.model}.yaml', 'r') as f:
         config = yaml.safe_load(f)
 
-    if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp", "tnpd", "tnpa", "tnpnd"]:
+    if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp", "tnpd", "tnpa", "tnpnd","convcnp"]:
         model = model_cls(**config)
     model.cuda()
 
@@ -108,7 +108,7 @@ def train(args, model):
             optimizer, T_max=args.num_steps)
 
     if args.resume:
-        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'))
+        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'),weights_only=False)
         model.load_state_dict(ckpt.model)
         optimizer.load_state_dict(ckpt.optimizer)
         scheduler.load_state_dict(ckpt.scheduler)
@@ -209,7 +209,7 @@ def gen_evalset(args):
 def eval(args, model):
     # eval a trained model on log-likelihood
     if args.mode == 'eval':
-        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
+        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda',weights_only=False)
         model.load_state_dict(ckpt.model)
         if args.eval_logfile is None:
             eval_logfile = f'eval_{args.eval_kernel}'
@@ -227,7 +227,7 @@ def eval(args, model):
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args)
-    eval_batches = torch.load(osp.join(path, filename))
+    eval_batches = torch.load(osp.join(path, filename),weights_only=False)
 
     if args.mode == "eval":
         torch.manual_seed(args.eval_seed)
@@ -263,7 +263,7 @@ def eval(args, model):
 
 def eval_all_metrics(args, model):
     # eval a trained model on log-likelihood, rsme, calibration, and sharpness
-    ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
+    ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda',weights_only=False)
     model.load_state_dict(ckpt.model)
     if args.eval_logfile is None:
         eval_logfile = f'eval_{args.eval_kernel}'
@@ -280,7 +280,7 @@ def eval_all_metrics(args, model):
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args)
-    eval_batches = torch.load(osp.join(path, filename))
+    eval_batches = torch.load(osp.join(path, filename),weights_only=False)
 
     if args.mode == "eval_all_metrics":
         torch.manual_seed(args.eval_seed)
@@ -301,6 +301,8 @@ def eval_all_metrics(args, model):
                     num_samples=args.eval_num_samples
                 )
                 ll = model(batch)
+            # elif args.model in ["convcnp"]:
+            #     outs = model.predict(batch.xc, batch.yc, batch.xt)
             else:
                 outs = model.predict(batch.xc, batch.yc, batch.xt)
                 ll = model(batch)
@@ -355,7 +357,7 @@ def plot(args, model):
     num_smp = args.plot_num_samples
 
     if args.mode == "plot":
-        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
+        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda',weights_only=False)
         model.load_state_dict(ckpt.model)
     model = model.cuda()
 
@@ -383,6 +385,8 @@ def plot(args, model):
     with torch.no_grad():
         if args.model in ["np", "anp", "bnp", "banp"]:
             outs = model(batch, num_smp, reduce_ll=False)
+        elif args.model in ['convcnp']:
+            outs = model(batch)
         else:
             outs = model(batch, reduce_ll=False)
         tar_loss = outs.tar_ll  # [Ns,B,Nt] ([B,Nt] for CNP)
