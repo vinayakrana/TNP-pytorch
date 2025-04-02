@@ -57,7 +57,7 @@ class GPSampler(object):
         batch.xt = batch.x[:,num_ctx:]  # [B,Nt,1]
 
         # batch_size * num_points * num_points
-        cov = self.kernel(batch.x)  # [B,N,N]
+        cov, length, scale, noise_scale = self.kernel(batch.x)  # [B,N,N]
         mean = torch.zeros(batch_size, num_points, device=device)  # [B,N]
         batch.y = MultivariateNormal(mean, cov).rsample().unsqueeze(-1)  # [B,N,Dy=1]
         batch.yc = batch.y[:,:num_ctx]  # [B,Nc,1]
@@ -69,7 +69,7 @@ class GPSampler(object):
             else:
                 t_noise = self.t_noise
             batch.y += t_noise * StudentT(2.1).rsample(batch.y.shape).to(device)
-        return batch
+        return batch, length, scale, noise_scale
         # {"x": [B,N,1], "xc": [B,Nc,1], "xt": [B,Nt,1],
         #  "y": [B,N,1], "yc": [B,Nt,1], "yt": [B,Nt,1]}
 
@@ -93,7 +93,7 @@ class RBFKernel(object):
         cov = scale.pow(2) * torch.exp(-0.5 * dist.pow(2).sum(-1)) \
                 + self.sigma_eps**2 * torch.eye(x.shape[-2]).to(x.device)
 
-        return cov  # [B,N,N]
+        return cov, length, scale, self.sigma_eps  # [B,N,N]
 
 class Matern52Kernel(object):
     def __init__(self, sigma_eps=2e-2, max_length=0.6, max_scale=1.0):

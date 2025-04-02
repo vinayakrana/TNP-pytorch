@@ -10,7 +10,8 @@ import uncertainty_toolbox as uct
 from attrdict import AttrDict
 from tqdm import tqdm
 from copy import deepcopy
-
+import gpytorch
+from models.exactgpmodel import EXACTGPMODEL
 from data.gp import *
 from utils.misc import load_module
 from utils.paths import results_path, evalsets_path
@@ -67,18 +68,26 @@ def main():
     else:
         args.root = osp.join(results_path, 'gp', args.model)
 
-    model_cls = getattr(load_module(f'models/{args.model}.py'), args.model.upper())
-    with open(f'configs/gp/{args.model}.yaml', 'r') as f:
-        config = yaml.safe_load(f)
+
 
     if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp", "tnpd", "tnpa", "tnpnd"]:
+        model_cls = getattr(load_module(f'models/{args.model}.py'), args.model.upper())
+        with open(f'configs/gp/{args.model}.yaml', 'r') as f:
+            config = yaml.safe_load(f)
         model = model_cls(**config)
-    model.cuda()
+        model.cuda()
+    
+    elif args.model == "exactgpmodel":
+        model = None
+
+    if args.model == "exactgp" and args.mode != "eval":
+        raise ValueError("Model 'exactgp' can only be used in 'eval' mode.")
 
     if args.mode == 'train':
         train(args, model)
     elif args.mode == 'eval':
-        eval(args, model)
+        output = eval(args, model)
+        print(output)
     elif args.mode == 'eval_all_metrics':
         eval_all_metrics(args, model)
     elif args.mode == 'plot':
@@ -207,42 +216,53 @@ def gen_evalset(args):
     torch.save(batches, osp.join(path, filename))
 
 def eval(args, model):
-    # eval a trained model on log-likelihood
-    if args.mode == 'eval':
-        ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
-        model.load_state_dict(ckpt.model)
-        if args.eval_logfile is None:
-            eval_logfile = f'eval_{args.eval_kernel}'
-            if args.t_noise is not None:
-                eval_logfile += f'_tn_{args.t_noise}'
-            eval_logfile += '.log'
-        else:
-            eval_logfile = args.eval_logfile
-        filename = os.path.join(args.root, eval_logfile)
-        logger = get_logger(filename, mode='w')
-    else:
-        logger = None
+    # if args.mode == 'eval':
+    #     if args.eval_logfile is None:
+    #         eval_logfile = f'eval_{args.eval_kernel}'
+    #         if args.t_noise is not None:
+    #             eval_logfile += f'_tn_{args.t_noise}'
+    #         eval_logfile += '.log'
+    #     else:
+    #         eval_logfile = args.eval_logfile
+    #     filename = os.path.join(args.root, eval_logfile)
+    #     logger = get_logger(filename, mode='w')
+    # else:
+    #     logger = None
 
     path, filename = get_eval_path(args)
     if not osp.isfile(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args)
-    eval_batches = torch.load(osp.join(path, filename))
+    eval_batches = torch.load(osp.join(path, filename),weights_only=False)
 
     if args.mode == "eval":
         torch.manual_seed(args.eval_seed)
         torch.cuda.manual_seed(args.eval_seed)
 
     ravg = RunningAverage()
-    model.eval()
-    with torch.no_grad():
-        for batch in tqdm(eval_batches, ascii=True):
-            for key, val in batch.items():
-                batch[key] = val.cuda()
-            if args.model in ["np", "anp", "bnp", "banp"]:
-                outs = model(batch, args.eval_num_samples)
-            else:
-                outs = model(batch)
+    for item in tqdm(eval_batches, ascii=True):
+
+        batch, length, scale, noise_scale = item
+        noise = noise_scale ** 2
+        likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_constraint=gpytorch.constraints.GreaterThan(noise))
+        for i in range(16):
+            model = EXACTGPMODEL(batch.xc[i], batch.yc[i].ravel(), likelihood)
+            model.cuda()
+            model.covar_module.base_kernel.lengthscale = length[i]  # this is scale and not scale^2
+            model.covar_module.outputscale = scale[i] ** 2 # this is sigma^2 and not sigma
+            model.likelihood.noise = noise # this is sigma^2 and not sigma
+
+            model.eval()
+            likelihood.eval()
+            with torch.no_grad():
+                observed_pred = likelihood(model(batch.xt[i]))
+            mean = observed_pred.mean
+            stddev = observed_pred.stddev
+
+            outs = AttrDict()
+            outs.target_ll = torch.distributions.Normal(mean, stddev).log_prob(batch.yt[i].ravel()).mean(-1)   
+
+            outs.rmse = torch.sqrt(torch.mean((mean - batch.yt[i].ravel())**2))
 
             for key, val in outs.items():
                 ravg.update(key, val)
@@ -255,9 +275,8 @@ def eval(args, model):
         line += f'tn {args.t_noise} '
     line += ravg.info()
 
-    if logger is not None:
-        logger.info(line)
-
+    # if logger is not None:
+    #     logger.info(line)
     return line
 
 
