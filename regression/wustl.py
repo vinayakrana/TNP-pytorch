@@ -1,6 +1,7 @@
 import os
 import os.path as osp
 import argparse
+import random
 import yaml
 import torch
 import numpy as np
@@ -10,7 +11,7 @@ from attrdict import AttrDict
 from tqdm import tqdm
 from copy import deepcopy
 from PIL import Image
-
+import xarray as xr
 from data.image import img_to_task, task_to_img
 from data.emnist import EMNIST
 from utils.misc import load_module
@@ -26,8 +27,8 @@ def main():
     parser.add_argument('--resume', type=str, default=None)
 
     # Data
-    parser.add_argument('--max_num_points', type=int, default=200)
-    parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
+    parser.add_argument('--max_num_points', type=int, default=5000)
+    # parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
 
     # Model
     parser.add_argument('--model', type=str, default="tnpd")
@@ -101,14 +102,9 @@ def train(args, model):
     with open(osp.join(args.root, 'args.yaml'), 'w') as f:
         yaml.dump(args.__dict__, f)
 
-    train_ds = EMNIST(train=True, class_range=args.class_range)
-    train_loader = torch.utils.data.DataLoader(train_ds,
-        batch_size=args.train_batch_size,
-        shuffle=True, num_workers=0)
-
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=len(train_loader)*args.num_epochs)
+            optimizer, T_max=264*args.num_epochs)
 
     if args.resume:
         ckpt = torch.load(osp.join(args.root, 'ckpt.tar'),weights_only=False)
@@ -128,13 +124,21 @@ def train(args, model):
     if not args.resume:
         logger.info('Total number of parameters: {}\n'.format(
             sum(p.numel() for p in model.parameters())))
+    
+    ds = xr.open_dataset('/home/vinayakrana/ActiveAir/TNP-pytorch/regression/datasets/WUSTL/scaled_train_data.nc')
+    train_start, train_end = "1998-01-01", "2008-12-01"
+
+    train_data = ds.sel(time=slice(train_start, train_end))
 
     for epoch in range(start_epoch, args.num_epochs+1):
         model.train()
-        for (x, _) in tqdm(train_loader, ascii=True):
-            x = x.cuda()
-            batch = img_to_task(x,
-                max_num_points=args.max_num_points)
+        for _ in tqdm(range(264)):
+
+            date = random.choice(train_data.time.values)
+            img = torch.from_numpy(train_data.sel(time=date).to_array().values).unsqueeze(0).cuda()
+
+            batch = img_to_task(img, max_num_points=args.max_num_points)
+            
             optimizer.zero_grad()
 
             if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp"]:
