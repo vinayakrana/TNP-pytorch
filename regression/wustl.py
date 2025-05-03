@@ -6,6 +6,7 @@ import yaml
 import torch
 import numpy as np
 import time
+import pickle
 import uncertainty_toolbox as uct
 from attrdict import AttrDict
 from tqdm import tqdm
@@ -28,7 +29,7 @@ def main():
 
     # Data
     parser.add_argument('--max_num_points', type=int, default=5000)
-    # parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
+    parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
 
     # Model
     parser.add_argument('--model', type=str, default="tnpd")
@@ -45,6 +46,7 @@ def main():
     parser.add_argument('--save_freq', type=int, default=10)
 
     # Eval
+    parser.add_argument('--save_dir', type=str, default='evalsets/wustl')
     parser.add_argument('--eval_seed', type=int, default=0)
     parser.add_argument('--eval_num_bs', type=int, default=50)
     parser.add_argument('--eval_batch_size', type=int, default=16)
@@ -177,35 +179,24 @@ def train(args, model):
 
 def gen_evalset(args):
 
-    torch.manual_seed(args.eval_seed)
-    torch.cuda.manual_seed(args.eval_seed)
-
-    eval_ds = EMNIST(train=False, class_range=args.class_range)
-    eval_loader = torch.utils.data.DataLoader(eval_ds,
-            batch_size=args.eval_batch_size,
-            shuffle=False, num_workers=0)
-
-    batches = []
-    for x, _ in tqdm(eval_loader, ascii=True):
-        batches.append(img_to_task(
-            x, max_num_points=args.max_num_points,
-            t_noise=args.t_noise)
-        )
-
-    torch.manual_seed(time.time())
-    torch.cuda.manual_seed(time.time())
-
-    path = osp.join(evalsets_path, 'emnist')
-    if not osp.isdir(path):
-        os.makedirs(path)
-
-    c1, c2 = args.class_range
-    filename = f'{c1}-{c2}'
-    if args.t_noise is not None:
-        filename += f'_{args.t_noise}'
-    filename += '.tar'
-
-    torch.save(batches, osp.join(path, filename))
+    val_ds = xr.open_dataset("datasets/WUSTL/scaled_val_data.nc")
+    n_context_list = [5, 20, 50, 100, 200, 500]
+    seeds = [0, 1, 2, 3, 4]
+    progress_bar = tqdm(total=len(n_context_list) * len(seeds))
+    np.random.seed(0)
+    checksum = 0
+    for n_context in n_context_list:
+        for seed in seeds:
+            batches = []
+            for timestamp in val_ds.time.values:
+                img = torch.from_numpy(val_ds.sel(time=timestamp).to_array().values).unsqueeze(0).cuda()
+                batch = img_to_task(img, seed=seed, max_num_points=args.max_num_points)
+                batches.append(batch)
+            save_path = f"evalsets/wustl/val_tasks/{n_context=}/{seed=}.pkl"
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            with open(save_path, "wb") as f:
+                pickle.dump(batches, f)
+            progress_bar.update(1)
 
 def eval(args, model):
     if args.mode == 'eval':
@@ -234,7 +225,13 @@ def eval(args, model):
         print('generating evaluation sets...')
         gen_evalset(args)
 
-    eval_batches = torch.load(osp.join(path, filename),weights_only=False)
+    eval_batches = []
+    val_tasks_path = 'evalsets/wustl/val_tasks'
+    for context_folder in os.listdir(val_tasks_path):
+        for task_file in os.listdir(f'{val_tasks_path}/{context_folder}'):
+            
+            with open(f'{val_tasks_path}/{context_folder}/{task_file}','rb') as f:
+                eval_batches.extend(pickle.load(f))
 
     torch.manual_seed(args.eval_seed)
     torch.cuda.manual_seed(args.eval_seed)

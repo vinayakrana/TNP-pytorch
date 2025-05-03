@@ -2,7 +2,14 @@ import torch
 from attrdict import AttrDict
 from torch.distributions import StudentT
 
-def img_to_task(img, num_ctx=None, max_num_points=None, target_all=True, t_noise=None):
+def img_to_task(img, num_ctx=None, max_num_points=None, target_all=True, t_noise=None, seed=None):
+
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed) 
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
     B, C, H, W = img.shape
     num_pixels = H * W
     img = img.view(B, C, -1)
