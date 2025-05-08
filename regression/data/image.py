@@ -1,40 +1,96 @@
 import torch
 from attrdict import AttrDict
+import numpy as np
 from torch.distributions import StudentT
 
-def img_to_task(img, num_ctx=None, max_num_points=None, target_all=True, t_noise=None, seed=None):
+# def img_to_task(img, num_ctx=None, max_num_points=None, target_all=True, t_noise=None, seed=None):
+
+#     if seed is not None:
+#         torch.manual_seed(seed)
+#         torch.cuda.manual_seed(seed) 
+#         torch.backends.cudnn.deterministic = True
+#         torch.backends.cudnn.benchmark = False
+
+#     B, C, H, W = img.shape
+#     num_pixels = H * W
+#     img = img.view(B, C, -1)
+
+#     if t_noise is not None:
+#         if t_noise == -1:
+#             t_noise = 0.09 * torch.rand(img.shape)
+#         img += t_noise * StudentT(2.1).rsample(img.shape)
+
+#     batch = AttrDict()
+#     max_num_points = max_num_points or num_pixels
+#     num_ctx = num_ctx or torch.randint(low=3, high=500, size=[1]).item()
+#     num_tar = max_num_points - num_ctx if target_all else torch.randint(low=3, high=max_num_points-num_ctx, size=[1]).item()
+#     num_points = num_ctx + num_tar
+#     idxs = torch.cuda.FloatTensor(B, num_pixels).uniform_().argsort(-1)[...,:num_points].to(img.device)
+#     x1, x2 = idxs // W, idxs % W
+    
+#     batch.x = torch.stack([x1.float(), x2.float()], -1).to(img.device)
+    
+#     batch.y = torch.gather(img, -1, idxs.unsqueeze(-2).repeat(1, C, 1)).transpose(-2, -1).to(img.device)
+
+#     batch.xc = batch.x[:, :num_ctx]
+#     batch.xt = batch.x[:, num_ctx:]
+#     batch.yc = batch.y[:, :num_ctx]
+#     batch.yt = batch.y[:, num_ctx:]
+
+#     return batch
+
+def img_to_task(data_array, num_context=None, num_target=None, date=None, seed=None, mask=None):
 
     if seed is not None:
         torch.manual_seed(seed)
         torch.cuda.manual_seed(seed) 
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        np.random.seed(seed)
+        
+    if not num_context:
+        num_context = np.random.randint(50, 500)
+    if not num_target:
+        num_target = np.random.randint(3000, 5000)
 
-    B, C, H, W = img.shape
-    num_pixels = H * W
-    img = img.view(B, C, -1)
+    all_times = data_array['time'].values
+    if date is None:        # Random date if not given
+        date = np.random.choice(all_times)
 
-    if t_noise is not None:
-        if t_noise == -1:
-            t_noise = 0.09 * torch.rand(img.shape)
-        img += t_noise * StudentT(2.1).rsample(img.shape)
+    day_data = data_array.sel(time=date)
 
-    batch = AttrDict()
-    max_num_points = max_num_points or num_pixels
-    num_ctx = num_ctx or torch.randint(low=3, high=500, size=[1]).item()
-    num_tar = max_num_points - num_ctx if target_all else torch.randint(low=3, high=max_num_points-num_ctx, size=[1]).item()
-    num_points = num_ctx + num_tar
-    idxs = torch.cuda.FloatTensor(B, num_pixels).uniform_().argsort(-1)[...,:num_points].to(img.device)
-    x1, x2 = idxs // W, idxs % W
+    lat_vals = day_data['x1'].values
+    lon_vals = day_data['x2'].values
+    lat_grid, lon_grid = np.meshgrid(lat_vals, lon_vals, indexing='ij')
+    coords = np.stack([lat_grid.ravel(), lon_grid.ravel()], axis=-1)
+
+    pm25_vals = day_data.values.ravel()[:, None]
+
+    if mask is not None:
+        valid_indices = np.where(mask.ravel() == 1)[0]
+    else:
+        valid_indices = np.arange(coords.shape[0])
     
-    batch.x = torch.stack([x1.float(), x2.float()], -1).to(img.device)
-    
-    batch.y = torch.gather(img, -1, idxs.unsqueeze(-2).repeat(1, C, 1)).transpose(-2, -1).to(img.device)
+    np.random.shuffle(valid_indices)
 
-    batch.xc = batch.x[:, :num_ctx]
-    batch.xt = batch.x[:, num_ctx:]
-    batch.yc = batch.y[:, :num_ctx]
-    batch.yt = batch.y[:, num_ctx:]
+    context_idx = valid_indices[:num_context]
+    target_idx = valid_indices[num_context:num_context + num_target]
+
+    # num_points = coords.shape[0]
+    # indices = np.arange(num_points)
+    # np.random.shuffle(indices)
+    batch = AttrDict()  
+
+    # context_idx = indices[:num_context]
+    # target_idx = indices[num_context:num_context + num_target]
+
+    batch.xc = torch.from_numpy(coords[context_idx][None, ...]).cuda()     #  (1, num_context, 2)
+    batch.yc = torch.from_numpy(pm25_vals[context_idx][None, ...]).cuda()  #  (1, num_context, 1)
+    batch.xt = torch.from_numpy(coords[target_idx][None, ...]).cuda()      #  (1, num_target, 2)
+    batch.yt = torch.from_numpy(pm25_vals[target_idx][None, ...]).cuda()   #  (1, num_target, 1)
+
+    batch.x = torch.cat([batch.xc, batch.xt], dim=1)  # [1, num_total, 2]
+    batch.y = torch.cat([batch.yc, batch.yt], dim=1)  # [1, num_total, 1]
 
     return batch
 

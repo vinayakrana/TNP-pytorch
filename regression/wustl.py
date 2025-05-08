@@ -23,13 +23,13 @@ def main():
     parser = argparse.ArgumentParser()
 
     # Experiment
-    parser.add_argument('--mode', choices=['train', 'eval', 'eval_all_metrics', 'plot', 'plot_samples'], default='train')
+    parser.add_argument('--mode', choices=['train', 'eval', 'test', 'eval_all_metrics','test_all_metrics', 'plot', 'plot_samples'], default='train')
     parser.add_argument('--expid', type=str, default='default')
     parser.add_argument('--resume', type=str, default=None)
 
     # Data
     parser.add_argument('--max_num_points', type=int, default=5000)
-    parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
+    # parser.add_argument('--class_range', type=int, nargs='*', default=[0,10])
 
     # Model
     parser.add_argument('--model', type=str, default="tnpd")
@@ -50,7 +50,7 @@ def main():
     parser.add_argument('--eval_seed', type=int, default=0)
     parser.add_argument('--eval_num_bs', type=int, default=50)
     parser.add_argument('--eval_batch_size', type=int, default=16)
-    parser.add_argument('--eval_num_samples', type=int, default=50)
+    parser.add_argument('--eval_num_samples', type=int, default=30)
     parser.add_argument('--eval_logfile', type=str, default=None)
 
     # Plot
@@ -67,19 +67,19 @@ def main():
     args = parser.parse_args()
 
     if args.expid is not None:
-        args.root = osp.join(results_path, 'emnist', args.model, args.expid)
+        args.root = osp.join(results_path, 'wustl', args.model, args.expid)
     else:
-        args.root = osp.join(results_path, 'emnist', args.model)
+        args.root = osp.join(results_path, 'wustl', args.model)
 
 
     model_cls = getattr(load_module(f'models/{args.model}.py'), args.model.upper())
-    with open(f'configs/emnist/{args.model}.yaml', 'r') as f:
+    with open(f'configs/emnist/{args.model}.yaml', 'r') as f:    # Keeping the config file same as the emnist config file
         config = yaml.safe_load(f)
     if args.pretrain:
         assert args.model == 'tnpa'
         config['pretrain'] = args.pretrain
 
-    if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp", "tnpd", "tnpa", "tnpnd"]:
+    if args.model in ["np", "anp", "cnp", "canp", "bnp", "banp", "tnpd", "tnpa", "tnpnd", "convcnp"]:
         model = model_cls(**config)
     model.cuda()
 
@@ -89,6 +89,10 @@ def main():
         eval(args, model)
     elif args.mode == 'eval_all_metrics':
         eval_all_metrics(args, model)
+    elif args.mode == 'test':
+        test(args, model)
+    elif args.mode == 'test_all_metrics':
+        test_all_metrics(args, model)
     elif args.mode == 'plot':
         plot(args, model)
     elif args.mode == 'plot_samples':
@@ -127,7 +131,7 @@ def train(args, model):
         logger.info('Total number of parameters: {}\n'.format(
             sum(p.numel() for p in model.parameters())))
     
-    ds = xr.open_dataset('/home/vinayakrana/ActiveAir/TNP-pytorch/regression/datasets/WUSTL/scaled_train_data.nc')
+    ds = xr.open_dataset('/home/vinayak.rana/TNP-pytorch/regression/datasets/WUSTL/scaled_train_data.nc')
     train_start, train_end = "1998-01-01", "2008-12-01"
 
     train_data = ds.sel(time=slice(train_start, train_end))
@@ -137,9 +141,10 @@ def train(args, model):
         for _ in tqdm(range(264)):
 
             date = random.choice(train_data.time.values)
-            img = torch.from_numpy(train_data.sel(time=date).to_array().values).unsqueeze(0).cuda()
+            # img = torch.from_numpy(train_data.sel(time=date).to_array().values).unsqueeze(0).cuda()
 
-            batch = img_to_task(img, max_num_points=args.max_num_points)
+            mask = np.load('data/india_mask.npy')
+            batch = img_to_task(ds['PM25'], mask=mask)
             
             optimizer.zero_grad()
 
@@ -180,7 +185,7 @@ def train(args, model):
 def gen_evalset(args):
 
     val_ds = xr.open_dataset("datasets/WUSTL/scaled_val_data.nc")
-    n_context_list = [5, 20, 50, 100, 200, 500]
+    n_context_list = [50, 100, 200, 500]
     seeds = [0, 1, 2, 3, 4]
     progress_bar = tqdm(total=len(n_context_list) * len(seeds))
     np.random.seed(0)
@@ -189,8 +194,9 @@ def gen_evalset(args):
         for seed in seeds:
             batches = []
             for timestamp in val_ds.time.values:
-                img = torch.from_numpy(val_ds.sel(time=timestamp).to_array().values).unsqueeze(0).cuda()
-                batch = img_to_task(img, seed=seed, max_num_points=args.max_num_points)
+                # img = torch.from_numpy(val_ds.sel(time=timestamp).to_array().values).unsqueeze(0).cuda()
+                mask = np.load('data/india_mask.npy')
+                batch = img_to_task(val_ds['PM25'], seed=seed, num_context=n_context, num_target=5000, mask=mask)
                 batches.append(batch)
             save_path = f"evalsets/wustl/val_tasks/{n_context=}/{seed=}.pkl"
             os.makedirs(os.path.dirname(save_path), exist_ok=True)
@@ -198,13 +204,36 @@ def gen_evalset(args):
                 pickle.dump(batches, f)
             progress_bar.update(1)
 
-def eval(args, model):
-    if args.mode == 'eval':
+def gen_testset(args):
+
+    test_ds = xr.open_dataset("datasets/WUSTL/scaled_test_data.nc")
+    n_context_list = [50, 100, 200, 500]
+    seeds = [0, 1, 2, 3, 4]
+    progress_bar = tqdm(total=len(n_context_list) * len(seeds))
+    np.random.seed(0)
+    checksum = 0
+    for n_context in n_context_list:
+        for seed in seeds:
+            batches = []
+            for timestamp in test_ds.time.values:
+                # img = torch.from_numpy(val_ds.sel(time=timestamp).to_array().values).unsqueeze(0).cuda()
+                mask = np.load('data/india_mask.npy')
+                batch = img_to_task(test_ds['PM25'], seed=seed, num_context=n_context, num_target=5000, mask=mask)
+                batches.append(batch)
+            save_path = f"evalsets/wustl/test_tasks/{n_context=}/{seed=}.pkl"
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            with open(save_path, "wb") as f:
+                pickle.dump(batches, f)
+            progress_bar.update(1)
+
+
+def test(args, model):
+    if args.mode == 'test':
         ckpt = torch.load(osp.join(args.root, 'ckpt.tar'),weights_only=False)
         model.load_state_dict(ckpt.model)
         if args.eval_logfile is None:
-            c1, c2 = args.class_range
-            eval_logfile = f'eval_{c1}-{c2}'
+            # c1, c2 = args.class_range
+            eval_logfile = f'test_wustl'
             if args.t_noise is not None:
                 eval_logfile += f'_{args.t_noise}'
             eval_logfile += '.log'
@@ -215,13 +244,82 @@ def eval(args, model):
     else:
         logger = None
 
-    path = osp.join(evalsets_path, 'emnist')
-    c1, c2 = args.class_range
-    filename = f'{c1}-{c2}'
+    path = osp.join(evalsets_path, 'wustl')
+    # c1, c2 = args.class_range
+    filename = f'test_tasks'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
-    filename += '.tar'
-    if not osp.isfile(osp.join(path, filename)):
+    # filename += '.tar'
+    # print(osp.join(path, filename))
+    if not osp.isdir(osp.join(path, filename)):
+        print('generating test sets...')
+        gen_testset(args)
+
+    test_batches = []
+    test_tasks_path = 'evalsets/wustl/test_tasks'
+    for context_folder in os.listdir(test_tasks_path):
+        for task_file in os.listdir(f'{test_tasks_path}/{context_folder}'):
+            
+            with open(f'{test_tasks_path}/{context_folder}/{task_file}','rb') as f:
+                test_batches.extend(pickle.load(f))
+
+    torch.manual_seed(args.eval_seed)
+    torch.cuda.manual_seed(args.eval_seed)
+
+    ravg = RunningAverage()
+    model.eval()
+    with torch.no_grad():
+        for batch in tqdm(test_batches, ascii=True):
+            for key, val in batch.items():
+                batch[key] = val.cuda()
+            
+            if args.model in ["np", "anp", "bnp", "banp"]:
+                outs = model(batch, args.eval_num_samples)
+            else:
+                outs = model(batch)
+
+            for key, val in outs.items():
+                ravg.update(key, val)
+
+    torch.manual_seed(time.time())
+    torch.cuda.manual_seed(time.time())
+
+    # c1, c2 = args.class_range
+    line = f'{args.model}:{args.expid}'
+    if args.t_noise is not None:
+        line += f'tn {args.t_noise} '
+    line += ravg.info()
+
+    if logger is not None:
+        logger.info(line)
+
+    return line
+
+def eval(args, model):
+    if args.mode == 'eval':
+        ckpt = torch.load(osp.join(args.root, 'ckpt.tar'),weights_only=False)
+        model.load_state_dict(ckpt.model)
+        if args.eval_logfile is None:
+            # c1, c2 = args.class_range
+            eval_logfile = f'eval_wustl'
+            if args.t_noise is not None:
+                eval_logfile += f'_{args.t_noise}'
+            eval_logfile += '.log'
+        else:
+            eval_logfile = args.eval_logfile
+        filename = osp.join(args.root, eval_logfile)
+        logger = get_logger(filename, mode='w')
+    else:
+        logger = None
+
+    path = osp.join(evalsets_path, 'wustl')
+    # c1, c2 = args.class_range
+    filename = f'val_tasks'
+    if args.t_noise is not None:
+        filename += f'_{args.t_noise}'
+    # filename += '.tar'
+    # print(osp.join(path, filename))
+    if not osp.isdir(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args)
 
@@ -254,8 +352,8 @@ def eval(args, model):
     torch.manual_seed(time.time())
     torch.cuda.manual_seed(time.time())
 
-    c1, c2 = args.class_range
-    line = f'{args.model}:{args.expid} {c1}-{c2} '
+    # c1, c2 = args.class_range
+    line = f'{args.model}:{args.expid}'
     if args.t_noise is not None:
         line += f'tn {args.t_noise} '
     line += ravg.info()
@@ -267,22 +365,29 @@ def eval(args, model):
 
 
 def eval_all_metrics(args, model):
-    ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda')
+    ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda',weights_only=False)
     model.load_state_dict(ckpt.model)
 
-    path = osp.join(evalsets_path, 'emnist')
-    c1, c2 = args.class_range
+    path = osp.join(evalsets_path, 'wustl')
+    # c1, c2 = args.class_range
     if not osp.isdir(path):
         os.makedirs(path)
-    filename = f'{c1}-{c2}'
+    filename = f'val_tasks'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
-    filename += '.tar'
-    if not osp.isfile(osp.join(path, filename)):
+    # filename += '.tar'
+    if not osp.isdir(osp.join(path, filename)):
         print('generating evaluation sets...')
         gen_evalset(args)
 
-    eval_batches = torch.load(osp.join(path, filename))
+    # eval_batches = torch.load(osp.join(path, filename))
+    eval_batches = []
+    val_tasks_path = 'evalsets/wustl/val_tasks'
+    for context_folder in os.listdir(val_tasks_path):
+        for task_file in os.listdir(f'{val_tasks_path}/{context_folder}'):
+            
+            with open(f'{val_tasks_path}/{context_folder}/{task_file}','rb') as f:
+                eval_batches.extend(pickle.load(f))
 
     torch.manual_seed(args.eval_seed)
     torch.cuda.manual_seed(args.eval_seed)
@@ -331,7 +436,7 @@ def eval_all_metrics(args, model):
     torch.manual_seed(time.time())
     torch.cuda.manual_seed(time.time())
 
-    line = f'{args.model}:{args.expid}:{c1}-{c2} '
+    line = f'{args.model}:{args.expid}'
     if args.t_noise is not None:
         line += f'tn {args.t_noise} '
     
@@ -341,15 +446,105 @@ def eval_all_metrics(args, model):
         line += ravg.info()
         line += '\n'
 
-    filename = f'eval_{c1}-{c2}_all_metrics'
+    filename = f'eval_all_metrics'
     if args.t_noise is not None:
         filename += f'_{args.t_noise}'
     filename += '.log'
-    logger = get_logger(osp.join(results_path, 'emnist', args.model, args.expid, filename), mode='w')
+    logger = get_logger(osp.join(results_path, 'wustl', args.model, args.expid, filename), mode='w')
     logger.info(line)
 
     return line
 
+def test_all_metrics(args, model):
+    ckpt = torch.load(os.path.join(args.root, 'ckpt.tar'), map_location='cuda',weights_only=False)
+    model.load_state_dict(ckpt.model)
+
+    path = osp.join(evalsets_path, 'wustl')
+    # c1, c2 = args.class_range
+    if not osp.isdir(path):
+        os.makedirs(path)
+    filename = f'test_tasks'
+    if args.t_noise is not None:
+        filename += f'_{args.t_noise}'
+    # filename += '.tar'
+    if not osp.isdir(osp.join(path, filename)):
+        print('generating test sets...')
+        gen_testset(args)
+
+    # eval_batches = torch.load(osp.join(path, filename))
+    test_batches = []
+    test_tasks_path = 'evalsets/wustl/test_tasks'
+    for context_folder in os.listdir(test_tasks_path):
+        for task_file in os.listdir(f'{test_tasks_path}/{context_folder}'):
+            
+            with open(f'{test_tasks_path}/{context_folder}/{task_file}','rb') as f:
+                test_batches.extend(pickle.load(f))
+
+    torch.manual_seed(args.eval_seed)
+    torch.cuda.manual_seed(args.eval_seed)
+
+    model.eval()
+    with torch.no_grad():
+        ravgs = [RunningAverage() for _ in range(3)] # 3 types of metrics
+        for batch in tqdm(test_batches, ascii=True):
+            for key, val in batch.items():
+                batch[key] = val.cuda()
+
+            if args.model in ["np", "anp", "bnp", "banp"]:
+                outs = model.predict(batch.xc, batch.yc, batch.xt, num_samples=args.eval_num_samples)
+                ll = model(batch, num_samples=args.eval_num_samples)
+            elif args.model in ["tnpa", "tnpnd"]:
+                outs = model.predict(
+                    batch.xc, batch.yc, batch.xt,
+                    num_samples=args.eval_num_samples
+                )
+                ll = model(batch)
+            else:
+                outs = model.predict(batch.xc, batch.yc, batch.xt, num_samples=args.eval_num_samples)
+                ll = model(batch)
+
+            mean, std = outs.loc, outs.scale
+
+            # shape: (num_samples, 1, num_points, 1)
+            if mean.dim() == 4:
+                var = std.pow(2).mean(dim=0) + mean.pow(2).mean(dim=0) - mean.mean(dim=0).pow(2)
+                std = var.sqrt().squeeze(0)
+                mean = mean.mean(dim=0).squeeze(0)
+            
+            mean, std = mean.squeeze().cpu().numpy().flatten(), std.squeeze().cpu().numpy().flatten()
+            yt = batch.yt.squeeze().cpu().numpy().flatten()
+
+            acc = uct.metrics.get_all_accuracy_metrics(mean, yt, verbose=False)
+            sharpness = uct.metrics.get_all_sharpness_metrics(std, verbose=False)
+            scoring_rule = {'tar_ll': ll.tar_ll.item()}
+
+            batch_metrics = [acc, sharpness, scoring_rule]
+            for i in range(len(batch_metrics)):
+                ravg, batch_metric = ravgs[i], batch_metrics[i]
+                for k in batch_metric.keys():
+                    ravg.update(k, batch_metric[k])
+
+    torch.manual_seed(time.time())
+    torch.cuda.manual_seed(time.time())
+
+    line = f'{args.model}:{args.expid}'
+    if args.t_noise is not None:
+        line += f'tn {args.t_noise} '
+    
+    line += '\n'
+
+    for ravg in ravgs:
+        line += ravg.info()
+        line += '\n'
+
+    filename = f'test_all_metrics'
+    if args.t_noise is not None:
+        filename += f'_{args.t_noise}'
+    filename += '.log'
+    logger = get_logger(osp.join(results_path, 'wustl', args.model, args.expid, filename), mode='w')
+    logger.info(line)
+
+    return line
 
 def plot(args, model):
     if args.mode == 'plot':

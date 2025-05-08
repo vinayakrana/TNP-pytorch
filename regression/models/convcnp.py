@@ -3,7 +3,7 @@ import neuralprocesses.torch as nps
 from attrdict import AttrDict
 
 class CONVCNP(torch.nn.Module):
-    def __init__(self, dim_x=1, dim_y=1, likelihood="lowrank"):
+    def __init__(self, dim_x=2, dim_y=1, likelihood="het"):
 
         super(CONVCNP, self).__init__()
         self.likelihood = likelihood
@@ -12,6 +12,7 @@ class CONVCNP(torch.nn.Module):
         
     def forward(self, batch):
 
+        self.model.train()
         xc, yc = batch.xc, batch.yc
         xt, yt = batch.xt, batch.yt
 
@@ -27,18 +28,33 @@ class CONVCNP(torch.nn.Module):
         outs.loss = -outs.tar_ll
         
         return outs
-    def predict(self, xc, yc, xt, num_samples=1):
+    # def predict(self, xc, yc, xt, num_samples=1):
 
-        self.eval()
+    #     self.eval()
+    #     with torch.no_grad():
+    #         xc = xc.permute(0, 2, 1)
+    #         xt = xt.permute(0, 2, 1)
+    #         yc = yc.permute(0, 2, 1)
+
+    #         mean, var, _, _ = nps.predict(self.model, xc, yc, xt)
+
+    #         return AttrDict(
+    #             loc=mean.permute(0, 2, 1),
+    #             scale=var.sqrt().permute(0, 2, 1)
+    #         )
+
+    def predict(self, xc, yc, xt, num_samples=40):
+        self.model.eval()
         with torch.no_grad():
-            xc = xc.permute(0, 2, 1)
-            xt = xt.permute(0, 2, 1)
-            yc = yc.permute(0, 2, 1)
+            xc = xc.permute(0, 2, 1).cpu()
+            xt = xt.permute(0, 2, 1).cpu()
+            yc = yc.permute(0, 2, 1).cpu()
 
-            mean, var, _, _ = nps.predict(self.model, xc, yc, xt)
+            # Wrap context as a list of tuples
+            mean, var, _, _ = nps.predict(self.model.cpu(), [(xc,yc)], xt, num_samples=num_samples)
 
+            self.model.cuda()
             return AttrDict(
-                loc=mean.permute(0, 2, 1),
-                scale=var.sqrt().permute(0, 2, 1)
+                loc=mean.permute(0, 2, 1).cuda(),
+                scale=var.sqrt().permute(0, 2, 1).cuda()
             )
-

@@ -39,7 +39,7 @@ class TNPD(TNP):
         )
 
     def forward(self, batch, reduce_ll=True):
-        z_target = self.encode(batch, autoreg=False)
+        z_target = self.encode(batch, autoreg=True)   #-> False
         out = self.predictor(z_target)
         mean, std = torch.chunk(out, 2, dim=-1)
         if self.bound_std:
@@ -65,7 +65,7 @@ class TNPD(TNP):
         batch.xt = xt
         batch.yt = torch.zeros((xt.shape[0], xt.shape[1], yc.shape[2]), device='cuda')
 
-        z_target = self.encode(batch, autoreg=False)
+        z_target = self.encode(batch, autoreg=True)   #-> False
         out = self.predictor(z_target)
         mean, std = torch.chunk(out, 2, dim=-1)
         if self.bound_std:
