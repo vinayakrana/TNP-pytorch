@@ -500,7 +500,7 @@ def test_all_metrics(args, model):
                 )
                 ll = model(batch)
             else:
-                outs = model.predict(batch.xc, batch.yc, batch.xt, num_samples=args.eval_num_samples)
+                outs = model.predict(batch.xc, batch.yc, batch.xt)
                 ll = model(batch)
 
             mean, std = outs.loc, outs.scale
